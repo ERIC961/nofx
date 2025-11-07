@@ -719,23 +719,32 @@ func (s *Server) handleDeleteTrader(c *gin.Context) {
 	userID := c.GetString("user_id")
 	traderID := c.Param("id")
 
-	// 从数据库删除
-	err := s.database.DeleteTrader(userID, traderID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("删除交易员失败: %v", err)})
-		return
-	}
+	log.Printf("🗑️  收到删除交易员请求: userID=%s, traderID=%s", userID, traderID)
 
 	// 如果交易员正在运行，先停止它
 	if trader, err := s.traderManager.GetTrader(traderID); err == nil {
 		status := trader.GetStatus()
 		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
+			log.Printf("⏹  停止运行中的交易员: %s", traderID)
 			trader.Stop()
-			log.Printf("⏹  已停止运行中的交易员: %s", traderID)
 		}
+		
+		// 🔧 关键修复：从内存中移除交易员
+		s.traderManager.RemoveTrader(traderID)
+		log.Printf("✓ 已从内存中移除交易员: %s", traderID)
+	} else {
+		log.Printf("⚠️  交易员不在内存中: %s, error=%v", traderID, err)
 	}
 
-	log.Printf("✓ 交易员已删除: %s", traderID)
+	// 从数据库删除
+	err := s.database.DeleteTrader(userID, traderID)
+	if err != nil {
+		log.Printf("❌ 从数据库删除交易员失败: userID=%s, traderID=%s, error=%v", userID, traderID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("删除交易员失败: %v", err)})
+		return
+	}
+
+	log.Printf("✓ 交易员已成功删除: %s", traderID)
 	c.JSON(http.StatusOK, gin.H{"message": "交易员已删除"})
 }
 
@@ -787,27 +796,53 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 	userID := c.GetString("user_id")
 	traderID := c.Param("id")
 
+	log.Printf("🛑 收到停止交易员请求: userID=%s, traderID=%s", userID, traderID)
+
 	// 校验交易员是否属于当前用户
 	_, _, _, err := s.database.GetTraderConfig(userID, traderID)
 	if err != nil {
+		log.Printf("❌ 数据库中未找到交易员: userID=%s, traderID=%s, error=%v", userID, traderID, err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "交易员不存在或无访问权限"})
 		return
 	}
 
+	// 🔧 增强调试：记录当前内存中所有交易员
+	allTraderIDs := s.traderManager.GetTraderIDs()
+	log.Printf("📋 当前内存中的交易员数量: %d, IDs: %v", len(allTraderIDs), allTraderIDs)
+
 	trader, err := s.traderManager.GetTrader(traderID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "交易员不存在"})
-		return
+		log.Printf("❌ 内存中未找到交易员: traderID=%s, error=%v", traderID, err)
+		log.Printf("💡 提示: 交易员在数据库中存在但不在内存中，可能是配置问题或重新加载失败")
+		
+		// 🔧 尝试重新加载用户的交易员
+		log.Printf("🔄 尝试重新加载用户 %s 的交易员...", userID)
+		if reloadErr := s.traderManager.LoadUserTraders(s.database, userID); reloadErr != nil {
+			log.Printf("⚠️  重新加载失败: %v", reloadErr)
+		} else {
+			// 再次尝试获取
+			trader, err = s.traderManager.GetTrader(traderID)
+			if err != nil {
+				log.Printf("❌ 重新加载后仍未找到交易员: %v", err)
+				c.JSON(http.StatusNotFound, gin.H{
+					"error": "交易员不在内存中",
+					"hint":  "交易员可能因为AI模型或交易所配置被禁用而未加载",
+				})
+				return
+			}
+			log.Printf("✓ 重新加载后找到交易员: %s", trader.GetName())
+		}
 	}
 
 	// 检查交易员是否正在运行
 	status := trader.GetStatus()
 	if isRunning, ok := status["is_running"].(bool); ok && !isRunning {
+		log.Printf("⚠️  交易员 %s 已经是停止状态", trader.GetName())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "交易员已停止"})
 		return
 	}
 
-	// 停止交易员
+	log.Printf("⏹  正在停止交易员 %s...", trader.GetName())
 	trader.Stop()
 
 	// 更新数据库中的运行状态
@@ -816,7 +851,7 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 		log.Printf("⚠️  更新交易员状态失败: %v", err)
 	}
 
-	log.Printf("⏹  交易员 %s 已停止", trader.GetName())
+	log.Printf("✓ 交易员 %s 已成功停止", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "交易员已停止"})
 }
 

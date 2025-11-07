@@ -266,6 +266,7 @@ func main() {
 
 	// 从数据库加载所有交易员到内存
 	err = traderManager.LoadTradersFromDatabase(database)
+
 	if err != nil {
 		log.Fatalf("❌ 加载交易员失败: %v", err)
 	}

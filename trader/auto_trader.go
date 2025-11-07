@@ -97,6 +97,8 @@ type AutoTrader struct {
 	lastResetTime         time.Time
 	stopUntil             time.Time
 	isRunning             bool
+	isStopped             bool               // 标记是否已停止（防止重复关闭channel）
+	stopMutex             sync.Mutex         // 保护 isStopped 和 channel 关闭操作
 	startTime             time.Time          // 系统启动时间
 	callCount             int                // AI调用次数
 	positionFirstSeenTime map[string]int64   // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
@@ -238,7 +240,16 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 
 // Run 运行自动交易主循环
 func (at *AutoTrader) Run() error {
+	// 🔧 重置停止状态，允许重新启动
+	at.stopMutex.Lock()
+	if at.isStopped {
+		// 重新创建 channel
+		at.stopMonitorCh = make(chan struct{})
+		at.isStopped = false
+	}
 	at.isRunning = true
+	at.stopMutex.Unlock()
+
 	log.Println("🚀 AI驱动自动交易系统启动")
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
@@ -267,9 +278,20 @@ func (at *AutoTrader) Run() error {
 	return nil
 }
 
-// Stop 停止自动交易
+// Stop 停止自动交易（幂等，可以安全地多次调用）
 func (at *AutoTrader) Stop() {
+	at.stopMutex.Lock()
+	defer at.stopMutex.Unlock()
+
+	// 如果已经停止，直接返回
+	if at.isStopped {
+		log.Printf("⚠️  交易员 %s 已经是停止状态，跳过重复停止", at.name)
+		return
+	}
+
+	log.Printf("⏹ 正在停止交易员 %s...", at.name)
 	at.isRunning = false
+	at.isStopped = true
 	close(at.stopMonitorCh) // 通知监控goroutine停止
 	at.monitorWg.Wait()     // 等待监控goroutine结束
 	log.Println("⏹ 自动交易系统停止")

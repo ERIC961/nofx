@@ -401,6 +401,20 @@ func (tm *TraderManager) GetTrader(id string) (*trader.AutoTrader, error) {
 	return t, nil
 }
 
+// RemoveTrader 从内存中移除指定的trader（用于删除交易员）
+func (tm *TraderManager) RemoveTrader(id string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if _, exists := tm.traders[id]; !exists {
+		return fmt.Errorf("trader ID '%s' 不存在", id)
+	}
+
+	delete(tm.traders, id)
+	log.Printf("🗑️  已从内存中移除交易员: %s", id)
+	return nil
+}
+
 // GetAllTraders 获取所有trader
 func (tm *TraderManager) GetAllTraders() map[string]*trader.AutoTrader {
 	tm.mu.RLock()
@@ -846,6 +860,17 @@ func (tm *TraderManager) LoadUserTraders(database *config.Database, userID strin
 
 // loadSingleTrader 加载单个交易员（从现有代码提取的公共逻辑）
 func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiModelCfg *config.AIModelConfig, exchangeCfg *config.ExchangeConfig, coinPoolURL, oiTopURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, defaultCoins []string, database *config.Database, userID string) error {
+	// 🔧 关键修复：检查交易员是否已经在内存中且正在运行
+	if existingTrader, exists := tm.traders[traderCfg.ID]; exists {
+		status := existingTrader.GetStatus()
+		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
+			log.Printf("⚠️  交易员 %s 正在运行，跳过重新加载以避免丢失运行状态", traderCfg.Name)
+			return nil
+		}
+		// 如果交易员存在但未运行，可以安全地替换它
+		log.Printf("🔄 交易员 %s 存在但未运行，将重新加载", traderCfg.Name)
+	}
+
 	// 处理交易币种列表
 	var tradingCoins []string
 	if traderCfg.TradingSymbols != "" {
